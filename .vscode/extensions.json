@@ -1,0 +1,15 @@
+{
+    "recommendations": [
+        // Python language support + Pylance (type checker / IntelliSense)
+        "ms-python.python",
+        "ms-python.pylance",
+        // Jupyter notebook support (useful for exploratory experiments)
+        "ms-toolsai.jupyter",
+        // Inline git diff / blame annotations
+        "eamodio.gitlens",
+        // Show TODO / FIXME comments in the Problems panel
+        "gruntfuggly.todo-tree",
+        // Markdown preview
+        "yzhang.markdown-all-in-one"
+    ]
+}

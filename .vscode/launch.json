@@ -1,0 +1,44 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // Run the full NeurAda-IMM experiment (training + evaluation)
+            "name": "Run nuScene_main.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/code/nuScene_main.py",
+            "cwd": "${workspaceFolder}/code",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/code"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            // Hyperparameter sweep
+            "name": "Run param_sweep.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/code/param_sweep.py",
+            "cwd": "${workspaceFolder}/code",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/code"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            // Debug the currently open Python file
+            "name": "Debug Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "cwd": "${workspaceFolder}/code",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/code"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}

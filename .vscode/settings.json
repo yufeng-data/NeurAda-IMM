@@ -1,0 +1,40 @@
+{
+    // Python interpreter — adjust the path to match your local environment.
+    // Examples:
+    //   Windows (conda):  "C:/Users/<user>/anaconda3/envs/<env>/python.exe"
+    //   Windows (venv):   "${workspaceFolder}/venv/Scripts/python.exe"
+    //   Linux/macOS:      "${workspaceFolder}/venv/bin/python"
+    "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python",
+
+    // Add the `code/` sub-directory to PYTHONPATH so that
+    // `import neurada_imm` works without installing the package.
+    "terminal.integrated.env.linux": {
+        "PYTHONPATH": "${workspaceFolder}/code"
+    },
+    "terminal.integrated.env.osx": {
+        "PYTHONPATH": "${workspaceFolder}/code"
+    },
+    "terminal.integrated.env.windows": {
+        "PYTHONPATH": "${workspaceFolder}/code"
+    },
+
+    // Pylance / python-analysis
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/code"
+    ],
+    "python.analysis.typeCheckingMode": "basic",
+
+    // Format on save (optional — remove if you prefer manual formatting)
+    "editor.formatOnSave": false,
+
+    // File associations
+    "files.associations": {
+        "*.py": "python"
+    },
+
+    // Exclude generated/cache directories from the explorer
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true
+    }
+}

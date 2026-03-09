@@ -5,6 +5,7 @@ __pycache__/
 venv/
 *.egg-info/
 data/
-.vscode/
+# VSCode user-specific files (workspace configs are tracked)
+.vscode/*.code-workspace
 .idea/
 *.pth
