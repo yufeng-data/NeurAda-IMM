@@ -48,8 +48,9 @@ from neurada_imm.data_synth import (
 from neurada_imm.data_nuscenes import load_nuscenes_trajectory
 from neurada_imm.filters import TraditionalIMM, NeurAdaIMM
 from neurada_imm.train import pretrain_model_bank, finetune_adaptive_nets
-from neurada_imm.metrics import compute_motve, compute_position_rmse, compute_mas
+from neurada_imm.metrics import compute_motve, compute_position_rmse, compute_mas, print_comparison_table
 from neurada_imm.plotting import plot_tracking_comparison, plot_nuscenes_tracking
+from neurada_imm.checkpoint import save_checkpoint
 
 
 def _make_Q(q_base: np.ndarray, qv_scale: float) -> np.ndarray:
@@ -135,8 +136,10 @@ def test_on_nuscenes(model_bank, selector, trans_net, weight_net):
     pos_rmse_neur = compute_position_rmse(neur_est, true_states)
 
     print("\n真实数据测试结果：")
-    print(f"传统IMM     - MOTVE: {motve_trad:.4f}, 位置RMSE: {pos_rmse_trad:.4f}")
-    print(f"NeurAda-IMM - MOTVE: {motve_neur:.4f}, 位置RMSE: {pos_rmse_neur:.4f}")
+    print_comparison_table({
+        'Traditional IMM': {'MOTVE': motve_trad, 'Position RMSE': pos_rmse_trad},
+        'NeurAda-IMM': {'MOTVE': motve_neur, 'Position RMSE': pos_rmse_neur},
+    })
 
     plot_nuscenes_tracking(true_states, noisy_meas, trad_est, neur_est)
 
@@ -168,10 +171,64 @@ def main():
     finetune_loader = DataLoader(finetune_dataset, batch_size=1, shuffle=True)
     selector, trans_net, weight_net = finetune_adaptive_nets(model_bank, finetune_loader, epochs=EPOCHS_FINETUNE)
 
+    # 训练完成后保存模型
+    save_checkpoint(model_bank, selector, trans_net, weight_net, path='checkpoint.pth')
+
+    # 合成数据对比测试
+    print("\n" + "=" * 60)
+    print("合成数据对比测试（NeurAda-IMM vs 传统IMM）")
+    print("=" * 60)
+    traj_test, modes_test = generate_trajectory_with_modes(num_steps=T_STEPS, density_level='medium')
+    ctx_test = generate_context(modes_test, density_value=0.5)
+    noisy_meas_test = add_measurement_noise(traj_test, sigma=OBS_SIGMA)
+
+    Q_cv = np.diag([0.1, 0.1, 0.5, 0.5, 0.01, 0.01]).astype(np.float32)
+    Q_ctrv = np.diag([0.1, 0.1, 1.0, 1.0, 0.1, 0.1]).astype(np.float32)
+    R = (np.eye(2) * OBS_SIGMA ** 2).astype(np.float32)
+    trans_matrix = np.array([[0.95, 0.05], [0.05, 0.95]], dtype=np.float32)
+
+    imm_trad = TraditionalIMM(DT, Q_cv, Q_ctrv, R, trans_matrix)
+    imm_trad.initialize(noisy_meas_test[0, :2])
+    trad_est_synth = [imm_trad.x_combined.copy()]
+    for t in range(1, T_STEPS):
+        trad_est_synth.append(imm_trad.step(noisy_meas_test[t, :2]).copy())
+    trad_est_synth = np.asarray(trad_est_synth, dtype=np.float32)
+
+    import torch
+    model_bank_cpu = [m.cpu() for m in model_bank]
+    selector_cpu = selector.cpu()
+    trans_net_cpu = trans_net.cpu()
+    weight_net_cpu = weight_net.cpu()
+
+    neur_imm_synth = NeurAdaIMM(DT, model_bank_cpu, selector_cpu, trans_net_cpu, weight_net_cpu,
+                                Q=_make_Q(PROCESS_NOISE, QV_SCALE),
+                                R=R, K=K_ACTIVE, context_dim=CONTEXT_DIM)
+    neur_imm_synth.initialize(noisy_meas_test[0, :2], ctx_test[0])
+    neur_est_synth = [neur_imm_synth.x_combined.copy()]
+    for t in range(1, T_STEPS):
+        ctx_test[t, 4] = float(np.linalg.norm(neur_imm_synth.x_combined[2:4]))
+        neur_est_synth.append(neur_imm_synth.step(noisy_meas_test[t, :2], ctx_test[t]).copy())
+    neur_est_synth = np.asarray(neur_est_synth, dtype=np.float32)
+
+    print_comparison_table({
+        'Traditional IMM': {
+            'MOTVE': compute_motve(trad_est_synth, traj_test),
+            'Position RMSE': compute_position_rmse(trad_est_synth, traj_test),
+        },
+        'NeurAda-IMM': {
+            'MOTVE': compute_motve(neur_est_synth, traj_test),
+            'Position RMSE': compute_position_rmse(neur_est_synth, traj_test),
+        },
+    })
+
+    plot_tracking_comparison(traj_test, noisy_meas_test, trad_est_synth, neur_est_synth,
+                             out_path='tracking_comparison.png')
+
     # 真实数据测试
     test_on_nuscenes(model_bank, selector, trans_net, weight_net)
 
     print("\n实验完成！")
+
 
 
 if __name__ == '__main__':

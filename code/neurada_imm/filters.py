@@ -5,6 +5,45 @@ from filterpy.kalman import KalmanFilter
 from .config import DEVICE
 
 
+def _safe_log_likelihood(innov: np.ndarray, S: np.ndarray) -> float:
+    """使用数值稳定的对数似然计算。
+
+    利用 slogdet 代替直接计算行列式，避免 det 为 0 或极小时出现 inf/nan。
+    同时对马氏距离设置上限，防止 exp 溢出。
+    """
+    _INVALID_LOG_LIKELIHOOD = -1e18
+    _MAX_MAHALANOBIS_SQUARED = 200.0
+
+    n = len(innov)
+    sign, logdet = np.linalg.slogdet(S)
+    if sign <= 0:
+        # S 不正定：退回极小的对数似然
+        return _INVALID_LOG_LIKELIHOOD
+
+    # 马氏距离平方，设上限防止 exp(-很大) -> 0 被误判
+    try:
+        S_inv = np.linalg.inv(S)
+    except np.linalg.LinAlgError:
+        S_inv = np.linalg.pinv(S)
+
+    maha2 = float(innov @ S_inv @ innov)
+    maha2 = min(maha2, _MAX_MAHALANOBIS_SQUARED)
+
+    log_like = -0.5 * (n * np.log(2 * np.pi) + logdet + maha2)
+    return float(log_like)
+
+
+def _log_likes_to_likes(log_likes: np.ndarray) -> np.ndarray:
+    """用 log-sum-exp 技巧将对数似然向量转换为似然向量（归一化到最大值为 0）。
+
+    避免直接 exp(large_negative) -> 0 或 exp(large_positive) -> inf。
+    """
+    log_likes = np.asarray(log_likes, dtype=np.float64)
+    max_ll = np.max(log_likes)
+    likes = np.exp(log_likes - max_ll)
+    return likes.astype(np.float32)
+
+
 class NNKFWrapper:
     """将神经网络模型包装成类似卡尔曼滤波器的接口（修复协方差传播）"""
 
@@ -47,9 +86,18 @@ class NNKFWrapper:
         z = np.asarray(z, dtype=np.float32)
         y = z - self.H @ self.x
         S = self.H @ self.P @ self.H.T + self.R
-        K = self.P @ self.H.T @ np.linalg.inv(S)
+
+        try:
+            S_inv = np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            S_inv = np.linalg.pinv(S)
+
+        K = self.P @ self.H.T @ S_inv
         self.x = self.x + K @ y
-        self.P = (np.eye(6, dtype=np.float32) - K @ self.H) @ self.P
+
+        # Joseph form：保证 P 对称正定，即使 K 不精确
+        I_KH = np.eye(6, dtype=np.float32) - K @ self.H
+        self.P = (I_KH @ self.P @ I_KH.T + K @ self.R @ K.T).astype(np.float32)
 
         if self._enable_vel_postprocess:
             dv = (self._vel_gain * y / max(self.dt, 1e-6)).astype(np.float32)
@@ -114,7 +162,7 @@ class TraditionalIMM:
             mixed_x.append(xj)
             mixed_P.append(Pj)
 
-        likelihood = np.zeros(K, dtype=np.float32)
+        log_likes = np.zeros(K, dtype=np.float64)
         for j in range(K):
             self.models[j].x = mixed_x[j]
             self.models[j].P = mixed_P[j]
@@ -123,9 +171,9 @@ class TraditionalIMM:
 
             innov = z - self.models[j].H @ self.models[j].x.flatten()
             S = self.models[j].H @ self.models[j].P @ self.models[j].H.T + self.R
-            detS = np.linalg.det(S)
-            like = (1.0 / np.sqrt((2 * np.pi) ** 2 * detS)) * np.exp(-0.5 * innov @ np.linalg.inv(S) @ innov)
-            likelihood[j] = like
+            log_likes[j] = _safe_log_likelihood(innov, S)
+
+        likelihood = _log_likes_to_likes(log_likes)
 
         c = likelihood @ cbar
         self.mu = (cbar * likelihood) / (c + 1e-8)
@@ -209,14 +257,15 @@ class NeurAdaIMM:
             mixed_x.append(xj)
             mixed_P.append(Pj)
 
-        likelihood = np.zeros(K, dtype=np.float32)
+        log_likes = np.zeros(K, dtype=np.float64)
         for j in range(K):
             self.models[j].x = mixed_x[j]
             self.models[j].P = mixed_P[j]
             self.models[j].predict()
             innov, S, detS = self.models[j].update(z)
-            like = (1.0 / np.sqrt((2 * np.pi) ** 2 * detS)) * np.exp(-0.5 * innov @ np.linalg.inv(S) @ innov)
-            likelihood[j] = like
+            log_likes[j] = _safe_log_likelihood(innov, S)
+
+        likelihood = _log_likes_to_likes(log_likes)
 
         c = likelihood @ cbar
         self.mu = (cbar * likelihood) / (c + 1e-8)
