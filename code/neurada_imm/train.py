@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
@@ -54,7 +55,7 @@ def pretrain_model_bank(trajectories, L: int = L_MODELS, epochs: int = 30):
 
 
 def finetune_adaptive_nets(model_bank, dataloader, epochs: int = 20):
-    """端到端微调选择网络、转移网络、权重网络（保持原实现）"""
+    """端到端微调选择网络、转移网络、权重网络"""
     L = len(model_bank)
     K = K_ACTIVE
     context_dim = CONTEXT_DIM
@@ -63,13 +64,14 @@ def finetune_adaptive_nets(model_bank, dataloader, epochs: int = 20):
     trans_net = TransitionNet(K, context_dim).to(DEVICE)
     weight_net = WeightNet(K).to(DEVICE)
 
+    # Optimizer 1：selector 和 trans_net
     optimizer = optim.Adam(
-        list(selector.parameters()) + list(trans_net.parameters()) + list(weight_net.parameters()),
+        list(selector.parameters()) + list(trans_net.parameters()),
         lr=0.001,
     )
 
-    # 注意：这里原代码用 CrossEntropyLoss + one-hot target（并不严格正确），为保持行为一致先不改。
-    ce_loss = nn.CrossEntropyLoss()
+    # Optimizer 2：weight_net 独立可微训练路径
+    weight_optimizer = optim.Adam(weight_net.parameters(), lr=0.0005)
 
     for m in model_bank:
         for p in m.parameters():
@@ -82,8 +84,11 @@ def finetune_adaptive_nets(model_bank, dataloader, epochs: int = 20):
         3: [0],
     }
 
+    mse_loss = nn.MSELoss()
+
     for epoch in range(epochs):
-        total_loss = 0.0
+        total_sel_loss = 0.0
+        total_wt_loss = 0.0
 
         for traj_batch, ctx_batch, modes_batch in dataloader:
             traj = traj_batch[0].to(DEVICE)
@@ -106,17 +111,16 @@ def finetune_adaptive_nets(model_bank, dataloader, epochs: int = 20):
             )
             imm.initialize(z[0].cpu().numpy(), ctx[0].cpu().numpy())
 
-            # 轨迹损失（原实现存在“np累积不可反传”的问题；这里保留仅作监控，不参与反传）
-            _loss_seq = 0.0
             for t in range(1, T):
-                x_pred = imm.step(z[t].cpu().numpy(), ctx[t].cpu().numpy())
-                state_true = traj[t].cpu().numpy()
-                _loss_seq += float(np.mean((x_pred[:4] - state_true[:4]) ** 2))
+                imm.step(z[t].cpu().numpy(), ctx[t].cpu().numpy())
 
-            sel_loss_total = 0.0
+            # ---- Selector loss（使用 KL 散度代替 CrossEntropyLoss）----
+            sel_loss_total = torch.tensor(0.0, device=DEVICE)
             for t in range(T):
                 ctx_t = ctx[t].unsqueeze(0)
-                sel_probs = selector(ctx_t)
+                # Use raw logits + log_softmax for numerical stability
+                logits = selector.net(ctx_t)  # (1, L)
+                log_probs = F.log_softmax(logits, dim=-1)
 
                 target = torch.zeros(1, L, device=DEVICE)
                 mode = int(modes[t].item())
@@ -126,14 +130,54 @@ def finetune_adaptive_nets(model_bank, dataloader, epochs: int = 20):
                 else:
                     target[0, :L] = 1.0 / L
 
-                sel_loss_total = sel_loss_total + ce_loss(sel_probs, target)
+                sel_loss_total = sel_loss_total + F.kl_div(log_probs, target, reduction='batchmean')
+
+            # 归一化到时间步数
+            sel_loss_total = sel_loss_total / max(T, 1)
 
             optimizer.zero_grad()
             sel_loss_total.backward()
+            torch.nn.utils.clip_grad_norm_(
+                list(selector.parameters()) + list(trans_net.parameters()),
+                max_norm=5.0,
+            )
             optimizer.step()
+            total_sel_loss += float(sel_loss_total.item())
 
-            total_loss += float(sel_loss_total.item()) / max(T, 1)
+            # ---- WeightNet 独立可微训练路径 ----
+            # 随机采样时间步，用模型库前 K 个模型预测，weight_net 加权融合后和真实下一步做 MSE
+            sample_steps = min(T - 1, 16)
+            step_indices = np.random.choice(T - 1, size=sample_steps, replace=False)
 
-        print(f"Finetune Epoch {epoch + 1}/{epochs}, Selection Loss: {total_loss / len(dataloader):.4f}")
+            wt_loss = torch.tensor(0.0, device=DEVICE)
+            for t in step_indices:
+                state_t = traj[t].unsqueeze(0)  # (1, 6)
+                state_next_true = traj[t + 1]   # (6,)
+
+                with torch.no_grad():
+                    model_preds = torch.stack(
+                        [model_bank[k](state_t) for k in range(K)], dim=1
+                    )  # (1, K, 6)
+
+                states_t = model_preds  # (1, K, 6)
+                mu_uniform = torch.ones(1, K, device=DEVICE) / K
+                weights = weight_net(states_t, mu_uniform)  # (1, K)
+
+                fused = (weights.unsqueeze(-1) * model_preds).sum(dim=1).squeeze(0)  # (6,)
+                wt_loss = wt_loss + mse_loss(fused[:4], state_next_true[:4])
+
+            wt_loss = wt_loss / max(sample_steps, 1)
+            weight_optimizer.zero_grad()
+            wt_loss.backward()
+            torch.nn.utils.clip_grad_norm_(weight_net.parameters(), max_norm=5.0)
+            weight_optimizer.step()
+            total_wt_loss += float(wt_loss.item())
+
+        print(
+            f"Finetune Epoch {epoch + 1}/{epochs}, "
+            f"Selection Loss: {total_sel_loss / len(dataloader):.4f}, "
+            f"WeightNet Loss: {total_wt_loss / len(dataloader):.4f}"
+        )
 
     return selector, trans_net, weight_net
+
